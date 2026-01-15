@@ -187,4 +187,5 @@ def rodar_robo():
             
     print("--- FIM DA EXECUÇÃO ---")
 
-if __name__ ==
+if __name__ == "__main__":
+    rodar_robo()
