@@ -2,7 +2,9 @@ yfinance
 pandas
 ta
 crewai
+langchain
 langchain_google_genai
-python-dotenv
+langchain_community
+duckduckgo-search
 pyTelegramBotAPI
-fpdf
+python-dotenv
