@@ -1,0 +1,1 @@
+print("Robô B3 Iniciado - Versão de Teste")
