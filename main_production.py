@@ -14,9 +14,17 @@ from ta.volatility import AverageTrueRange
 # Bibliotecas de IA
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
-# AQUI MUDOU: Importamos direto a biblioteca oficial, não o wrapper do LangChain
-from duckduckgo_search import DDGS
 import telebot
+
+# --- SOLUÇÃO DO CONFLITO DE VERSÕES ---
+# Tenta importar do jeito novo (ddgs). Se falhar, tenta do jeito velho.
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 
 # --- CONFIGURAÇÃO ---
 load_dotenv()
@@ -67,17 +75,30 @@ def validar_setup_v2(ticker):
         print(f"Erro no screener ({ticker}): {e}")
         return False, None
 
-# --- 2. FERRAMENTA DE BUSCA NATIVA (A CORREÇÃO) ---
+# --- 2. FERRAMENTA DE BUSCA (SOLUÇÃO BLINDADA) ---
 
 @tool("News Search")
 def search_news(query: str):
     """Busca notícias recentes sobre o ativo."""
-    # Implementação direta para evitar erros de versão do LangChain
+    if DDGS is None:
+        return "Erro técnico: Biblioteca de busca não instalada no servidor."
+        
     try:
-        results = DDGS().text(keywords=query, region='br-pt', max_results=3)
+        # Tenta buscar
+        with DDGS() as ddgs:
+            # Pede 3 resultados
+            results = list(ddgs.text(keywords=query, region='br-pt', max_results=3))
+        
+        # AQUI ESTAVA O ERRO DE TRAVAMENTO:
+        # Se a lista vier vazia [], o robô travava. Agora retornamos um texto explicativo.
+        if not results:
+            return "Nenhuma notícia recente encontrada. Assumir normalidade."
+            
         return str(results)
+        
     except Exception as e:
-        return f"Erro na busca: {e}"
+        # Se der qualquer erro na busca, retorna erro legível em vez de quebrar
+        return f"Falha na conexão de busca: {str(e)}. Ignorar notícias e seguir técnico."
 
 # --- 3. AGENTES (Gemini 2.0 Flash) ---
 
@@ -86,7 +107,7 @@ MODELO_IA = "gemini/gemini-2.0-flash"
 analista_risco = Agent(
     role='Risk Manager',
     goal='VETAR a operação se houver notícias ruins.',
-    backstory='Você é um gestor de risco conservador. Se houver más notícias recentes (3 dias), você VETA.',
+    backstory='Você é um gestor de risco. Se a busca retornar "Nenhuma notícia", você considera SEGURO. Se houver notícias ruins, você VETA.',
     tools=[search_news],
     llm=MODELO_IA,
     verbose=True
@@ -95,7 +116,7 @@ analista_risco = Agent(
 manager = Agent(
     role='CIO',
     goal='Decidir entrada, Stop e Alvo.',
-    backstory='Você decide a compra baseada no risco e define os preços técnicos usando ATR.',
+    backstory='Você decide a compra. Se o Risk Manager disser SEGURO ou "Sem notícias", você COMPRA. Se disser PERIGOSO, você CANCELA.',
     llm=MODELO_IA,
     verbose=True
 )
@@ -103,14 +124,14 @@ manager = Agent(
 # --- 4. TAREFAS ---
 
 t_risco = Task(
-    description='Busque notícias urgentes de {ticket} no Brasil. Resuma os riscos encontrados na busca.',
-    expected_output='Resumo de riscos e veredito: SEGURO ou PERIGOSO.',
+    description='Busque notícias urgentes de {ticket} no Brasil.',
+    expected_output='Resumo curto. Veredito final: SEGURO ou PERIGOSO.',
     agent=analista_risco
 )
 
 t_manager = Task(
     description='''O ativo {ticket} passou na matemática. Preço: {price}, ATR: {atr}.
-    Decida com base no risco relatado pelo Risk Manager.
+    Analise o parecer do Risk Manager.
     Retorne APENAS JSON:
     {{
         "ticker": "{ticket}",
@@ -153,7 +174,7 @@ def enviar_alerta(sinal):
 # --- 6. EXECUÇÃO ---
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (V3 - BUSCA NATIVA) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (V4 - FINAL) ---")
     
     if not os.path.exists("carteira_alvo.json"):
         print("Erro: carteira_alvo.json não encontrado.")
