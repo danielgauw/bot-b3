@@ -75,10 +75,10 @@ def search_news(query: str):
     search = DuckDuckGoSearchRun()
     return search.run(query)
 
-# --- 3. AGENTES (Versão Compatível CrewAI Novo) ---
+# --- 3. AGENTES (Configurados para Gemini Flash) ---
 
-# Usamos o formato novo de string
-MODELO_IA = "gemini/gemini-pro"
+# MODELO CORRIGIDO AQUI
+MODELO_IA = "gemini/gemini-1.5-flash"
 
 analista_risco = Agent(
     role='Risk Manager',
@@ -150,7 +150,7 @@ def enviar_alerta(sinal):
 # --- 6. EXECUÇÃO ---
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (VERSÃO FINAL) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (VERSÃO FLASH) ---")
     
     if not os.path.exists("carteira_alvo.json"):
         print("Erro: carteira_alvo.json não encontrado.")
