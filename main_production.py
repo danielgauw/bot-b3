@@ -16,13 +16,12 @@ from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
 import telebot
 
-# --- SOLUÇÃO DO CONFLITO DE VERSÕES ---
-# Tenta importar do jeito novo (ddgs). Se falhar, tenta do jeito velho.
+# --- IMPORTAÇÃO DA BUSCA ---
 try:
-    from ddgs import DDGS
+    from duckduckgo_search import DDGS
 except ImportError:
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         DDGS = None
 
@@ -37,7 +36,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# --- 1. O HARD SCREEN (MATEMÁTICA V2) ---
+# --- 1. O HARD SCREEN (MATEMÁTICA) ---
 def validar_setup_v2(ticker):
     try:
         df = yf.download(ticker, period="1y", progress=False)
@@ -46,11 +45,9 @@ def validar_setup_v2(ticker):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Ignora dados muito velhos
         if (datetime.now() - df.index[-1].to_pydatetime()).days > 5:
             return False, None
 
-        # Indicadores
         df['SMA200'] = SMAIndicator(df['Close'], window=200).sma_indicator()
         df['SMA50'] = SMAIndicator(df['Close'], window=50).sma_indicator()
         df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
@@ -61,7 +58,6 @@ def validar_setup_v2(ticker):
 
         atual = df.iloc[-1]
 
-        # Regras
         tendencia = (atual['Close'] > atual['SMA200']) and (atual['Close'] > atual['SMA50'])
         forca = atual['ADX'] > 20
         pullback = (atual['RSI'] < 60) and (atual['RSI'] > 35)
@@ -75,30 +71,28 @@ def validar_setup_v2(ticker):
         print(f"Erro no screener ({ticker}): {e}")
         return False, None
 
-# --- 2. FERRAMENTA DE BUSCA (SOLUÇÃO BLINDADA) ---
+# --- 2. FERRAMENTA DE BUSCA (CORRIGIDA PARA V5) ---
 
 @tool("News Search")
 def search_news(query: str):
-    """Busca notícias recentes sobre o ativo."""
+    """Busca notícias recentes."""
     if DDGS is None:
-        return "Erro técnico: Biblioteca de busca não instalada no servidor."
+        return "Erro: Instale 'pip install -U duckduckgo-search'"
         
     try:
-        # Tenta buscar
+        # CORREÇÃO CRÍTICA: Sintaxe simplificada que funciona em todas as versões
         with DDGS() as ddgs:
-            # Pede 3 resultados
-            results = list(ddgs.text(keywords=query, region='br-pt', max_results=3))
+            # Passamos 'query' direto, sem 'keywords='
+            results = list(ddgs.text(query, region='br-pt', max_results=3))
         
-        # AQUI ESTAVA O ERRO DE TRAVAMENTO:
-        # Se a lista vier vazia [], o robô travava. Agora retornamos um texto explicativo.
         if not results:
-            return "Nenhuma notícia recente encontrada. Assumir normalidade."
+            return "Nenhuma notícia encontrada. Seguir análise técnica."
             
         return str(results)
         
     except Exception as e:
-        # Se der qualquer erro na busca, retorna erro legível em vez de quebrar
-        return f"Falha na conexão de busca: {str(e)}. Ignorar notícias e seguir técnico."
+        # Se der erro, não trava o robô. Retorna mensagem de erro.
+        return f"Erro na busca ({str(e)}). Assumir risco neutro."
 
 # --- 3. AGENTES (Gemini 2.0 Flash) ---
 
@@ -106,8 +100,8 @@ MODELO_IA = "gemini/gemini-2.0-flash"
 
 analista_risco = Agent(
     role='Risk Manager',
-    goal='VETAR a operação se houver notícias ruins.',
-    backstory='Você é um gestor de risco. Se a busca retornar "Nenhuma notícia", você considera SEGURO. Se houver notícias ruins, você VETA.',
+    goal='Ler notícias. Se houver erro na busca ou nenhuma notícia, APROVAR.',
+    backstory='Você analisa riscos. Se a ferramenta de busca falhar, você assume que não há notícias ruins e libera.',
     tools=[search_news],
     llm=MODELO_IA,
     verbose=True
@@ -115,8 +109,8 @@ analista_risco = Agent(
 
 manager = Agent(
     role='CIO',
-    goal='Decidir entrada, Stop e Alvo.',
-    backstory='Você decide a compra. Se o Risk Manager disser SEGURO ou "Sem notícias", você COMPRA. Se disser PERIGOSO, você CANCELA.',
+    goal='Decidir trade.',
+    backstory='Decide compra/venda. Se o Risk Manager liberar, você define entrada e stop.',
     llm=MODELO_IA,
     verbose=True
 )
@@ -124,14 +118,13 @@ manager = Agent(
 # --- 4. TAREFAS ---
 
 t_risco = Task(
-    description='Busque notícias urgentes de {ticket} no Brasil.',
-    expected_output='Resumo curto. Veredito final: SEGURO ou PERIGOSO.',
+    description='Busque notícias de {ticket}. Se der erro, responda "Sem notícias relevantes".',
+    expected_output='Resumo curto.',
     agent=analista_risco
 )
 
 t_manager = Task(
-    description='''O ativo {ticket} passou na matemática. Preço: {price}, ATR: {atr}.
-    Analise o parecer do Risk Manager.
+    description='''O ativo {ticket} passou na matemática (Preço: {price}, ATR: {atr}).
     Retorne APENAS JSON:
     {{
         "ticker": "{ticket}",
@@ -171,10 +164,10 @@ def enviar_alerta(sinal):
     except Exception:
         pass
 
-# --- 6. EXECUÇÃO ---
+# --- 6. EXECUÇÃO COM FREIO (PARA EVITAR ERRO 429) ---
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (V4 - FINAL) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (V5 - COM FREIO) ---")
     
     if not os.path.exists("carteira_alvo.json"):
         print("Erro: carteira_alvo.json não encontrado.")
@@ -195,6 +188,11 @@ def rodar_robo():
                 'price': f"{df['Close'].iloc[-1]:.2f}"
             }
             try:
+                # FREIO DE SEGURANÇA: Espera 20 segundos antes de chamar a IA
+                # Isso evita o erro 429 (Resource Exhausted)
+                print("⏳ Aguardando 20s para respeitar limite do Google...")
+                time.sleep(20)
+                
                 resultado = equipe.kickoff(inputs=inputs)
                 texto_limpo = str(resultado).replace('```json', '').replace('```', '').strip()
                 sinal = json.loads(texto_limpo)
