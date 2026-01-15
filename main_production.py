@@ -78,7 +78,7 @@ def search_news(query: str):
 # --- 3. AGENTES (Configurados para Gemini Flash) ---
 
 # MODELO CORRIGIDO AQUI
-MODELO_IA = "gemini/gemini-1.5-flash"
+MODELO_IA = "gemini/gemini-2.0-flash"
 
 analista_risco = Agent(
     role='Risk Manager',
