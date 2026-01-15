@@ -14,13 +14,13 @@ from ta.volatility import AverageTrueRange
 # Bibliotecas de IA
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
-from langchain_community.tools import DuckDuckGoSearchRun
+# AQUI MUDOU: Importamos direto a biblioteca oficial, não o wrapper do LangChain
+from duckduckgo_search import DDGS
 import telebot
 
 # --- CONFIGURAÇÃO ---
 load_dotenv()
 
-# VACINA: Garante que a chave do Google seja vista pelos novos sistemas do CrewAI
 if os.getenv("GOOGLE_API_KEY"):
     os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
@@ -67,17 +67,20 @@ def validar_setup_v2(ticker):
         print(f"Erro no screener ({ticker}): {e}")
         return False, None
 
-# --- 2. FERRAMENTAS ---
+# --- 2. FERRAMENTA DE BUSCA NATIVA (A CORREÇÃO) ---
 
 @tool("News Search")
 def search_news(query: str):
-    """Busca notícias recentes."""
-    search = DuckDuckGoSearchRun()
-    return search.run(query)
+    """Busca notícias recentes sobre o ativo."""
+    # Implementação direta para evitar erros de versão do LangChain
+    try:
+        results = DDGS().text(keywords=query, region='br-pt', max_results=3)
+        return str(results)
+    except Exception as e:
+        return f"Erro na busca: {e}"
 
-# --- 3. AGENTES (Configurados para Gemini Flash) ---
+# --- 3. AGENTES (Gemini 2.0 Flash) ---
 
-# MODELO CORRIGIDO AQUI
 MODELO_IA = "gemini/gemini-2.0-flash"
 
 analista_risco = Agent(
@@ -100,14 +103,14 @@ manager = Agent(
 # --- 4. TAREFAS ---
 
 t_risco = Task(
-    description='Busque notícias urgentes de {ticket} no Brasil. Resuma os riscos.',
+    description='Busque notícias urgentes de {ticket} no Brasil. Resuma os riscos encontrados na busca.',
     expected_output='Resumo de riscos e veredito: SEGURO ou PERIGOSO.',
     agent=analista_risco
 )
 
 t_manager = Task(
     description='''O ativo {ticket} passou na matemática. Preço: {price}, ATR: {atr}.
-    Decida com base no risco.
+    Decida com base no risco relatado pelo Risk Manager.
     Retorne APENAS JSON:
     {{
         "ticker": "{ticket}",
@@ -150,7 +153,7 @@ def enviar_alerta(sinal):
 # --- 6. EXECUÇÃO ---
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (VERSÃO FLASH) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (V3 - BUSCA NATIVA) ---")
     
     if not os.path.exists("carteira_alvo.json"):
         print("Erro: carteira_alvo.json não encontrado.")
