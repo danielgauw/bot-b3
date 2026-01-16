@@ -146,6 +146,44 @@ equipe = Crew(
     process=Process.sequential
 )
 
+# --- FUNÇÃO NOVA: REGISTRAR TRADE SIMULADO ---
+def registrar_trade(sinal):
+    arquivo = "trades_simulados.json"
+    historico = []
+    
+    # Carrega histórico existente se houver
+    if os.path.exists(arquivo):
+        with open(arquivo, "r") as f:
+            try:
+                historico = json.load(f)
+            except:
+                pass
+    
+    # Evita duplicatas no mesmo dia (Importante para não sujar o dashboard)
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    for trade in historico:
+        if trade['ticker'] == sinal['ticker'] and trade['data'].startswith(hoje):
+            return 
+
+    # Cria o registro do trade
+    novo_trade = {
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ticker": sinal['ticker'],
+        "entrada": sinal['entrada'],
+        "stop": sinal['stop'],
+        "alvo": sinal['alvo'],
+        "status": "ABERTO", # ABERTO, GAIN ou LOSS
+        "resultado_financeiro": 0.0,
+        "confianca": sinal['confianca']
+    }
+    
+    historico.append(novo_trade)
+    
+    with open(arquivo, "w") as f:
+        json.dump(historico, f, indent=4)
+        
+    print(f"📝 Trade simulado registrado no caderno: {sinal['ticker']}")
+
 # --- 5. TELEGRAM ---
 
 def enviar_alerta(sinal):
@@ -164,10 +202,10 @@ def enviar_alerta(sinal):
     except Exception:
         pass
 
-# --- 6. EXECUÇÃO COM FREIO (PARA EVITAR ERRO 429) ---
+# --- 6. EXECUÇÃO COM FREIO E REGISTRO ---
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (V5 - COM FREIO) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (V6 - FINAL COM AUDITOR) ---")
     
     if not os.path.exists("carteira_alvo.json"):
         print("Erro: carteira_alvo.json não encontrado.")
@@ -200,6 +238,7 @@ def rodar_robo():
                 if sinal['decisao'] == "COMPRA":
                     print(f"🚀 COMPRA CONFIRMADA: {ticker}")
                     enviar_alerta(sinal)
+                    registrar_trade(sinal)  # <--- REGISTRO AUTOMÁTICO AQUI
                 else:
                     print(f"❌ {ticker} vetado pela IA.")
             except Exception as e:

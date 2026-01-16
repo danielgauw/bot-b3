@@ -1,0 +1,15 @@
+[
+    {
+        "data": "2026-01-16 15:00:00",
+        "ticker": "WEGE3.SA",
+        "entrada": 46.40,
+        "stop": 45.37,
+        "alvo": 48.46,
+        "status": "ABERTO",
+        "resultado_financeiro": 0.0,
+        "confianca": "ALTA",
+        "acumulado": 0.0,
+        "preco_atual": 46.40,
+        "resultado_pct": 0.0
+    }
+]
