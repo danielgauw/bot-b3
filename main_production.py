@@ -4,19 +4,18 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 
-# --- CORREÇÃO DE CAMINHO ABSOLUTO (A BLINDAGEM) ---
-# Isso garante que o Cron ache os arquivos (.env, json, etc)
+# --- INFRAESTRUTURA BLINDADA ---
 DIRETORIO_BASE = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_ENV = os.path.join(DIRETORIO_BASE, '.env')
 CAMINHO_TRADES = os.path.join(DIRETORIO_BASE, 'trades_simulados.json')
 CAMINHO_CARTEIRA = os.path.join(DIRETORIO_BASE, 'carteira_alvo.json')
 
-# Carrega o .env explicitamente do caminho certo
 load_dotenv(CAMINHO_ENV)
 
 # Bibliotecas de Dados
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator, ADXIndicator
 from ta.volatility import AverageTrueRange
@@ -36,7 +35,6 @@ except ImportError:
         DDGS = None
 
 # --- CONFIGURAÇÃO DE CHAVES ---
-# (Pega direto do arquivo .env ou do sistema)
 if os.getenv("GOOGLE_API_KEY"):
     os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
@@ -45,91 +43,142 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# --- 1. O HARD SCREEN (MATEMÁTICA) ---
+# --- 1. O HARD SCREEN & FEATURE ENGINEERING (O CÉREBRO MATEMÁTICO) ---
 def validar_setup_v2(ticker):
+    """
+    Retorna:
+    1. Aprovado (Bool): Se passou no filtro básico.
+    2. DF (DataFrame): Os dados brutos.
+    3. Features (Dict): A 'Foto' técnica do mercado para auditoria/ML.
+    """
     try:
-        df = yf.download(ticker, period="1y", progress=False)
-        if df.empty: return False, None
+        # Baixa dados suficientes para médias longas e cálculo de volume
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        if df.empty: return False, None, {}
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Filtro de liquidez/atualização (5 dias)
+        # Filtro de Data (Evita dados velhos)
         if (datetime.now() - df.index[-1].to_pydatetime()).days > 5:
-            return False, None
+            return False, None, {}
 
+        # --- CÁLCULO DE INDICADORES TÉCNICOS ---
+        # 1. Tendência
         df['SMA200'] = SMAIndicator(df['Close'], window=200).sma_indicator()
         df['SMA50'] = SMAIndicator(df['Close'], window=50).sma_indicator()
+        
+        # 2. Momentum & Força
         df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
         adx = ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
         df['ADX'] = adx.adx()
+        
+        # 3. Volatilidade (Risco)
         atr = AverageTrueRange(df['High'], df['Low'], df['Close'], window=14)
         df['ATR'] = atr.average_true_range()
+        
+        # 4. Volume (Liquidez)
+        # Preenche NaN com 0 para não quebrar cálculo
+        df['Volume'] = df['Volume'].fillna(0)
+        df['Vol_SMA20'] = df['Volume'].rolling(window=20).mean()
 
+        # Dados do último candle fechado
         atual = df.iloc[-1]
 
+        # --- REGRAS DE FILTRO (GATEKEEPER) ---
+        # Tendência de alta clássica (Preço acima das médias)
         tendencia = (atual['Close'] > atual['SMA200']) and (atual['Close'] > atual['SMA50'])
-        forca = atual['ADX'] > 20
-        pullback = (atual['RSI'] < 60) and (atual['RSI'] > 35)
-
-        if tendencia and forca and pullback:
-            return True, df
         
-        return False, None
+        # Força da tendência (Evita mercado lateral morto)
+        forca = atual['ADX'] > 20
+        
+        # Pullback saudável (Evita comprar topo eufórico > 70 ou faca caindo < 30)
+        pullback = (atual['RSI'] < 65) and (atual['RSI'] > 35)
+
+        aprovado = tendencia and forca and pullback
+
+        # --- FEATURE ENGINEERING (A FOTO DO MERCADO) ---
+        # Aqui capturamos TUDO que estava acontecendo no momento do trade
+        # Esses dados são vitais para entender POR QUE o robô errou ou acertou.
+        
+        try:
+            vol_ratio = float(atual['Volume'] / atual['Vol_SMA20']) if atual['Vol_SMA20'] > 0 else 0.0
+        except:
+            vol_ratio = 0.0
+
+        features = {
+            "preco_entrada": float(atual['Close']),
+            "rsi": float(atual['RSI']),
+            "adx": float(atual['ADX']),
+            "atr_absoluto": float(atual['ATR']),
+            "atr_percentual": float(atual['ATR'] / atual['Close']) * 100, # Volatilidade em %
+            
+            # Distância das Médias (Mean Reversion Risk)
+            # Se for muito alto (ex: > 15%), risco de correção é iminente
+            "distancia_sma200_pct": float((atual['Close'] - atual['SMA200']) / atual['SMA200']) * 100,
+            "distancia_sma50_pct": float((atual['Close'] - atual['SMA50']) / atual['SMA50']) * 100,
+            
+            # Volume Ratio
+            # < 1.0 = Volume abaixo da média (Fraco)
+            # > 1.5 = Volume forte (Institucional)
+            "volume_ratio": vol_ratio,
+            
+            # Contexto Temporal
+            "dia_semana": df.index[-1].weekday(), # 0=Seg, 4=Sex
+            "mes": df.index[-1].month
+        }
+
+        return aprovado, df, features
 
     except Exception as e:
         print(f"Erro no screener ({ticker}): {e}")
-        return False, None
+        return False, None, {}
 
 # --- 2. FERRAMENTA DE BUSCA ---
 @tool("News Search")
 def search_news(query: str):
     """Busca notícias recentes."""
-    if DDGS is None:
-        return "Erro: Instale 'pip install -U duckduckgo-search'"
-        
+    if DDGS is None: return "Erro: Biblioteca DDGS ausente."
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, region='br-pt', max_results=3))
-        
-        if not results:
-            return "Nenhuma notícia encontrada. Seguir análise técnica."
-            
+        if not results: return "Sem notícias relevantes."
         return str(results)
-        
     except Exception as e:
-        return f"Erro na busca ({str(e)}). Assumir risco neutro."
+        return f"Erro busca: {str(e)}"
 
-# --- 3. AGENTES (Gemini 2.0 Flash) ---
+# --- 3. AGENTES (IA) ---
 MODELO_IA = "gemini/gemini-2.0-flash"
 
 analista_risco = Agent(
     role='Risk Manager',
-    goal='Ler notícias. Se houver erro na busca ou nenhuma notícia, APROVAR.',
-    backstory='Você analisa riscos. Se a ferramenta de busca falhar, você assume que não há notícias ruins e libera.',
+    goal='Identificar notícias de alto risco (falências, corrupção, quedas bruscas).',
+    backstory='Você protege o capital. Na dúvida, veta.',
     tools=[search_news],
     llm=MODELO_IA,
     verbose=True
 )
 
 manager = Agent(
-    role='CIO',
-    goal='Decidir trade.',
-    backstory='Decide compra/venda. Se o Risk Manager liberar, você define entrada e stop.',
+    role='Portfolio Manager',
+    goal='Validar entrada técnica com base no risco.',
+    backstory='Você recebe o sinal técnico e as notícias. Decide o trade.',
     llm=MODELO_IA,
     verbose=True
 )
 
 # --- 4. TAREFAS ---
 t_risco = Task(
-    description='Busque notícias de {ticket}. Se der erro, responda "Sem notícias relevantes".',
-    expected_output='Resumo curto.',
+    description='Busque notícias urgentes de {ticket}.',
+    expected_output='Resumo de riscos.',
     agent=analista_risco
 )
 
 t_manager = Task(
-    description='''O ativo {ticket} passou na matemática (Preço: {price}, ATR: {atr}).
-    Retorne APENAS JSON:
+    description='''O ativo {ticket} tem setup técnico de COMPRA.
+    Dados Técnicos: Preço {price}, ATR {atr}.
+    Analise o risco das notícias.
+    Retorne JSON:
     {{
         "ticker": "{ticket}",
         "decisao": "COMPRA" ou "CANCELAR",
@@ -137,7 +186,7 @@ t_manager = Task(
         "stop": float,
         "alvo": float,
         "confianca": "ALTA" ou "MEDIA",
-        "motivo": "resumo curto"
+        "motivo": "string curta"
     }}''',
     expected_output='JSON Válido.',
     agent=manager,
@@ -150,17 +199,17 @@ equipe = Crew(
     process=Process.sequential
 )
 
-# --- FUNÇÃO CORRIGIDA: REGISTRAR TRADE ---
+# --- 5. REGISTRO DE TRADES (DATA WAREHOUSE) ---
 def registrar_trade(sinal):
-    # Usa o CAMINHO_TRADES absoluto definido lá em cima
     historico = []
     
+    # Carrega histórico com segurança
     if os.path.exists(CAMINHO_TRADES):
-        with open(CAMINHO_TRADES, "r") as f:
-            try:
+        try:
+            with open(CAMINHO_TRADES, "r") as f:
                 historico = json.load(f)
-            except:
-                pass
+        except:
+            pass # Se arquivo estiver corrompido, cria novo
     
     # Evita duplicatas do dia
     hoje = datetime.now().strftime("%Y-%m-%d")
@@ -168,15 +217,24 @@ def registrar_trade(sinal):
         if trade['ticker'] == sinal['ticker'] and trade['data'].startswith(hoje):
             return 
 
+    # Estrutura de Dados Enriquecida para ML Futuro
     novo_trade = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": sinal['ticker'],
+        # Dados Operacionais
         "entrada": sinal['entrada'],
         "stop": sinal['stop'],
         "alvo": sinal['alvo'],
         "status": "ABERTO",
         "resultado_financeiro": 0.0,
-        "confianca": sinal['confianca']
+        "resultado_pct": 0.0,
+        
+        # Metadados da Decisão
+        "confianca": sinal['confianca'],
+        "motivo_ia": sinal.get('motivo', 'N/A'),
+        
+        # A CAIXA PRETA (Dados Técnicos para Análise de Falha/Sucesso)
+        "features_tecnicas": sinal.get('features_ml', {})
     }
     
     historico.append(novo_trade)
@@ -184,77 +242,86 @@ def registrar_trade(sinal):
     with open(CAMINHO_TRADES, "w") as f:
         json.dump(historico, f, indent=4)
         
-    print(f"📝 Trade simulado registrado no caderno: {sinal['ticker']}")
+    print(f"📝 Trade Registrado (Com dados técnicos): {sinal['ticker']}")
 
-# --- 5. TELEGRAM ---
+# --- 6. TELEGRAM & EXECUÇÃO ---
 def enviar_alerta(sinal):
     if not bot: return
     emoji = "🟢" if sinal.get('confianca') == "ALTA" else "🟡"
+    ft = sinal.get('features_ml', {})
+    
+    # Adicionamos dados técnicos no alerta para você ver na hora
     msg = f"""
 🚀 **SINAL: {sinal.get('ticker')}**
-📊 **Status:** `STRONG BUY` {emoji}
+📊 **Decisão:** `COMPRA` {emoji}
+
 💰 **Entrada:** `R$ {sinal.get('entrada')}`
 🛑 **Stop:** `R$ {sinal.get('stop')}`
 🏁 **Alvo:** `R$ {sinal.get('alvo')}`
-📝 **Motivo:** {sinal.get('motivo')}
+
+📉 **Dados da Caixa Preta:**
+• RSI: {ft.get('rsi', 0):.1f} (Ideal: 35-60)
+• Vol Ratio: {ft.get('volume_ratio', 0):.2f}x (Ideal: >1.0)
+• Dist. MM200: {ft.get('distancia_sma200_pct', 0):.1f}%
+
+📝 **Motivo IA:** {sinal.get('motivo')}
     """
     try:
         bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
     except Exception as e:
         print(f"Erro Telegram: {e}")
 
-# --- 6. EXECUÇÃO ---
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (V7 - SMART & BLINDADO) ---")
+    print("--- INICIANDO ROBÔ V7.1 (PRODUÇÃO & COLETA DE DADOS) ---")
     
-    # Usa o CAMINHO_CARTEIRA absoluto
     if not os.path.exists(CAMINHO_CARTEIRA):
-        print(f"Erro: {CAMINHO_CARTEIRA} não encontrado.")
-        # Cria um arquivo padrão se não existir para não quebrar
+        # Fallback de segurança: cria carteira padrão se não existir
         with open(CAMINHO_CARTEIRA, "w") as f:
-            json.dump(["WEGE3.SA", "VALE3.SA", "PETR4.SA", "ITUB4.SA", "BBAS3.SA"], f)
-        
+            json.dump(["WEGE3.SA", "VALE3.SA", "PETR4.SA", "ITUB4.SA", "PRIO3.SA"], f)
+            
     with open(CAMINHO_CARTEIRA, "r") as f:
         carteira = json.load(f)
         
     for ticker in carteira:
         print(f"\n🔎 Analisando {ticker}...")
-        aprovado, df = validar_setup_v2(ticker)
+        aprovado, df, features_tecnicas = validar_setup_v2(ticker)
         
         if aprovado:
-            print(f"✅ {ticker} Aprovado na Matemática! Chamando IA...")
+            print(f"✅ {ticker} Aprovado no Filtro Quantitativo.")
+            
             inputs = {
                 'ticket': ticker, 
-                'atr': f"{df['ATR'].iloc[-1]:.2f}",
-                'price': f"{df['Close'].iloc[-1]:.2f}"
+                'atr': f"{features_tecnicas['atr_absoluto']:.2f}",
+                'price': f"{features_tecnicas['preco_entrada']:.2f}"
             }
+            
             try:
-                print("⏳ Aguardando 20s para respeitar limite do Google...")
+                print("⏳ Aguardando 20s (API Rate Limit)...")
                 time.sleep(20)
                 
                 resultado = equipe.kickoff(inputs=inputs)
                 
-                # Tratamento de erro da string JSON
-                if hasattr(resultado, 'raw'):
-                    texto_limpo = resultado.raw
-                else:
-                    texto_limpo = str(resultado)
-                
-                texto_limpo = texto_limpo.replace('```json', '').replace('```', '').strip()
+                # Tratamento robusto de saída da IA
+                raw_out = getattr(resultado, 'raw', str(resultado))
+                texto_limpo = raw_out.replace('```json', '').replace('```', '').strip()
                 sinal = json.loads(texto_limpo)
                 
                 if sinal['decisao'] == "COMPRA":
+                    # INJETA OS DADOS TÉCNICOS NO SINAL PARA GRAVAÇÃO
+                    sinal['features_ml'] = features_tecnicas
+                    
                     print(f"🚀 COMPRA CONFIRMADA: {ticker}")
                     enviar_alerta(sinal)
                     registrar_trade(sinal)
                 else:
-                    print(f"❌ {ticker} vetado pela IA.")
+                    print(f"❌ {ticker} vetado pelo Risk Manager.")
+                    
             except Exception as e:
-                print(f"Erro IA: {e}")
+                print(f"Erro Crítico na IA ou JSON: {e}")
         else:
-            pass
+            print(f"⏹️ {ticker} Reprovado no filtro técnico.")
             
-    print("--- FIM DA EXECUÇÃO ---")
+    print("--- FIM DA ROTINA ---")
 
 if __name__ == "__main__":
     rodar_robo()
