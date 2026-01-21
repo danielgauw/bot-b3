@@ -5,6 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # --- INFRAESTRUTURA BLINDADA ---
+# Garante que o robô ache os arquivos onde quer que esteja
 DIRETORIO_BASE = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_ENV = os.path.join(DIRETORIO_BASE, '.env')
 CAMINHO_TRADES = os.path.join(DIRETORIO_BASE, 'trades_simulados.json')
@@ -43,16 +44,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# --- 1. O HARD SCREEN & FEATURE ENGINEERING (O CÉREBRO MATEMÁTICO) ---
+# --- 1. O HARD SCREEN & FEATURE ENGINEERING ---
 def validar_setup_v2(ticker):
     """
     Retorna:
-    1. Aprovado (Bool): Se passou no filtro básico.
-    2. DF (DataFrame): Os dados brutos.
-    3. Features (Dict): A 'Foto' técnica do mercado para auditoria/ML.
+    1. Aprovado (Bool)
+    2. DF (DataFrame)
+    3. Features (Dict) - A 'Foto' técnica do mercado para auditoria/ML.
     """
     try:
-        # Baixa dados suficientes para médias longas e cálculo de volume
+        # Baixa dados (2 anos para garantir médias longas)
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
         if df.empty: return False, None, {}
         
@@ -63,44 +64,31 @@ def validar_setup_v2(ticker):
         if (datetime.now() - df.index[-1].to_pydatetime()).days > 5:
             return False, None, {}
 
-        # --- CÁLCULO DE INDICADORES TÉCNICOS ---
-        # 1. Tendência
+        # --- CÁLCULO DE INDICADORES ---
         df['SMA200'] = SMAIndicator(df['Close'], window=200).sma_indicator()
         df['SMA50'] = SMAIndicator(df['Close'], window=50).sma_indicator()
         
-        # 2. Momentum & Força
         df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
         adx = ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
         df['ADX'] = adx.adx()
         
-        # 3. Volatilidade (Risco)
         atr = AverageTrueRange(df['High'], df['Low'], df['Close'], window=14)
         df['ATR'] = atr.average_true_range()
         
-        # 4. Volume (Liquidez)
-        # Preenche NaN com 0 para não quebrar cálculo
+        # Volume (Média de 20 dias)
         df['Volume'] = df['Volume'].fillna(0)
         df['Vol_SMA20'] = df['Volume'].rolling(window=20).mean()
 
-        # Dados do último candle fechado
         atual = df.iloc[-1]
 
-        # --- REGRAS DE FILTRO (GATEKEEPER) ---
-        # Tendência de alta clássica (Preço acima das médias)
+        # --- REGRAS DE FILTRO ---
         tendencia = (atual['Close'] > atual['SMA200']) and (atual['Close'] > atual['SMA50'])
-        
-        # Força da tendência (Evita mercado lateral morto)
         forca = atual['ADX'] > 20
-        
-        # Pullback saudável (Evita comprar topo eufórico > 70 ou faca caindo < 30)
         pullback = (atual['RSI'] < 65) and (atual['RSI'] > 35)
 
         aprovado = tendencia and forca and pullback
 
-        # --- FEATURE ENGINEERING (A FOTO DO MERCADO) ---
-        # Aqui capturamos TUDO que estava acontecendo no momento do trade
-        # Esses dados são vitais para entender POR QUE o robô errou ou acertou.
-        
+        # --- FEATURE ENGINEERING (A FOTO DO MOMENTO) ---
         try:
             vol_ratio = float(atual['Volume'] / atual['Vol_SMA20']) if atual['Vol_SMA20'] > 0 else 0.0
         except:
@@ -111,16 +99,13 @@ def validar_setup_v2(ticker):
             "rsi": float(atual['RSI']),
             "adx": float(atual['ADX']),
             "atr_absoluto": float(atual['ATR']),
-            "atr_percentual": float(atual['ATR'] / atual['Close']) * 100, # Volatilidade em %
+            "atr_percentual": float(atual['ATR'] / atual['Close']) * 100,
             
-            # Distância das Médias (Mean Reversion Risk)
-            # Se for muito alto (ex: > 15%), risco de correção é iminente
+            # Distância das Médias (%)
             "distancia_sma200_pct": float((atual['Close'] - atual['SMA200']) / atual['SMA200']) * 100,
             "distancia_sma50_pct": float((atual['Close'] - atual['SMA50']) / atual['SMA50']) * 100,
             
             # Volume Ratio
-            # < 1.0 = Volume abaixo da média (Fraco)
-            # > 1.5 = Volume forte (Institucional)
             "volume_ratio": vol_ratio,
             
             # Contexto Temporal
@@ -203,13 +188,12 @@ equipe = Crew(
 def registrar_trade(sinal):
     historico = []
     
-    # Carrega histórico com segurança
     if os.path.exists(CAMINHO_TRADES):
         try:
             with open(CAMINHO_TRADES, "r") as f:
                 historico = json.load(f)
         except:
-            pass # Se arquivo estiver corrompido, cria novo
+            pass 
     
     # Evita duplicatas do dia
     hoje = datetime.now().strftime("%Y-%m-%d")
@@ -217,23 +201,17 @@ def registrar_trade(sinal):
         if trade['ticker'] == sinal['ticker'] and trade['data'].startswith(hoje):
             return 
 
-    # Estrutura de Dados Enriquecida para ML Futuro
     novo_trade = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": sinal['ticker'],
-        # Dados Operacionais
         "entrada": sinal['entrada'],
         "stop": sinal['stop'],
         "alvo": sinal['alvo'],
         "status": "ABERTO",
         "resultado_financeiro": 0.0,
         "resultado_pct": 0.0,
-        
-        # Metadados da Decisão
         "confianca": sinal['confianca'],
         "motivo_ia": sinal.get('motivo', 'N/A'),
-        
-        # A CAIXA PRETA (Dados Técnicos para Análise de Falha/Sucesso)
         "features_tecnicas": sinal.get('features_ml', {})
     }
     
@@ -242,7 +220,7 @@ def registrar_trade(sinal):
     with open(CAMINHO_TRADES, "w") as f:
         json.dump(historico, f, indent=4)
         
-    print(f"📝 Trade Registrado (Com dados técnicos): {sinal['ticker']}")
+    print(f"📝 Trade Registrado: {sinal['ticker']} a R$ {sinal['entrada']}")
 
 # --- 6. TELEGRAM & EXECUÇÃO ---
 def enviar_alerta(sinal):
@@ -250,18 +228,17 @@ def enviar_alerta(sinal):
     emoji = "🟢" if sinal.get('confianca') == "ALTA" else "🟡"
     ft = sinal.get('features_ml', {})
     
-    # Adicionamos dados técnicos no alerta para você ver na hora
     msg = f"""
 🚀 **SINAL: {sinal.get('ticker')}**
 📊 **Decisão:** `COMPRA` {emoji}
 
-💰 **Entrada:** `R$ {sinal.get('entrada')}`
+💰 **Entrada REAL:** `R$ {sinal.get('entrada')}`
 🛑 **Stop:** `R$ {sinal.get('stop')}`
 🏁 **Alvo:** `R$ {sinal.get('alvo')}`
 
-📉 **Dados da Caixa Preta:**
-• RSI: {ft.get('rsi', 0):.1f} (Ideal: 35-60)
-• Vol Ratio: {ft.get('volume_ratio', 0):.2f}x (Ideal: >1.0)
+📉 **Raio-X Técnico:**
+• RSI: {ft.get('rsi', 0):.1f}
+• Vol Ratio: {ft.get('volume_ratio', 0):.2f}x
 • Dist. MM200: {ft.get('distancia_sma200_pct', 0):.1f}%
 
 📝 **Motivo IA:** {sinal.get('motivo')}
@@ -272,10 +249,9 @@ def enviar_alerta(sinal):
         print(f"Erro Telegram: {e}")
 
 def rodar_robo():
-    print("--- INICIANDO ROBÔ V7.1 (PRODUÇÃO & COLETA DE DADOS) ---")
+    print("--- INICIANDO ROBÔ V7.2 (SNIPER MODE) ---")
     
     if not os.path.exists(CAMINHO_CARTEIRA):
-        # Fallback de segurança: cria carteira padrão se não existir
         with open(CAMINHO_CARTEIRA, "w") as f:
             json.dump(["WEGE3.SA", "VALE3.SA", "PETR4.SA", "ITUB4.SA", "PRIO3.SA"], f)
             
@@ -301,13 +277,27 @@ def rodar_robo():
                 
                 resultado = equipe.kickoff(inputs=inputs)
                 
-                # Tratamento robusto de saída da IA
+                # Tratamento de saída da IA
                 raw_out = getattr(resultado, 'raw', str(resultado))
                 texto_limpo = raw_out.replace('```json', '').replace('```', '').strip()
                 sinal = json.loads(texto_limpo)
                 
                 if sinal['decisao'] == "COMPRA":
-                    # INJETA OS DADOS TÉCNICOS NO SINAL PARA GRAVAÇÃO
+                    # --- SNIPER MODE: REFRESH DE PREÇO ---
+                    # Atualiza o preço para o segundo exato da execução
+                    print("🔄 Buscando preço em tempo real para execução...")
+                    try:
+                        ticker_obj = yf.Ticker(ticker)
+                        # Pega o último trade (Close do dia atual)
+                        preco_real_agora = ticker_obj.history(period="1d")['Close'].iloc[-1]
+                        
+                        print(f"📉 Preço IA: {sinal['entrada']} -> Preço REAL: {preco_real_agora:.2f}")
+                        sinal['entrada'] = round(float(preco_real_agora), 2)
+                        
+                    except Exception as e:
+                        print(f"⚠️ Erro no Refresh de Preço ({e}). Mantendo preço da análise.")
+
+                    # Injeta dados da caixa preta
                     sinal['features_ml'] = features_tecnicas
                     
                     print(f"🚀 COMPRA CONFIRMADA: {ticker}")
@@ -317,7 +307,7 @@ def rodar_robo():
                     print(f"❌ {ticker} vetado pelo Risk Manager.")
                     
             except Exception as e:
-                print(f"Erro Crítico na IA ou JSON: {e}")
+                print(f"Erro Crítico: {e}")
         else:
             print(f"⏹️ {ticker} Reprovado no filtro técnico.")
             
