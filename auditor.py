@@ -7,12 +7,18 @@ import telebot
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+# --- BLINDAGEM DE CAMINHO ABSOLUTO (CRÍTICO) ---
+# Garante que o robô ache os arquivos independente de quem o execute (Cron, Usuário, etc)
+DIRETORIO_BASE = os.path.dirname(os.path.abspath(__file__))
+CAMINHO_ENV = os.path.join(DIRETORIO_BASE, '.env')
+CAMINHO_TRADES = os.path.join(DIRETORIO_BASE, 'trades_simulados.json')
+CAMINHO_HTML = os.path.join(DIRETORIO_BASE, 'dashboard.html')
+
 # --- CONFIGURAÇÕES ---
-load_dotenv()
+load_dotenv(CAMINHO_ENV) # Carrega do caminho certo
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-ARQUIVO_TRADES = "trades_simulados.json"
-ARQUIVO_HTML = "dashboard.html"
 CAPITAL_INICIAL = 10000.00  # Começamos com 10k fictícios
 APOSTA_POR_TRADE = 2000.00  # Risco de 2k por operação
 
@@ -204,18 +210,22 @@ def gerar_html(stats, trades, benchmarks):
     </html>
     """
     
-    with open(ARQUIVO_HTML, "w", encoding='utf-8') as f:
+    # SALVA USANDO O CAMINHO ABSOLUTO
+    with open(CAMINHO_HTML, "w", encoding='utf-8') as f:
         f.write(html)
-    return ARQUIVO_HTML
+    return CAMINHO_HTML
 
 # --- LÓGICA PRINCIPAL DE AUDITORIA ---
 
 def auditar():
-    if not os.path.exists(ARQUIVO_TRADES):
+    print("--- INICIANDO AUDITORIA V7 ---")
+    
+    # 1. Carregar Trades com Caminho Absoluto
+    if not os.path.exists(CAMINHO_TRADES):
         print("Sem trades para auditar.")
         return
 
-    with open(ARQUIVO_TRADES, "r") as f:
+    with open(CAMINHO_TRADES, "r") as f:
         trades = json.load(f)
 
     if not trades: return
@@ -296,8 +306,8 @@ def auditar():
             trade['acumulado'] = saldo_acumulado
             trades_processados.append(trade)
 
-    # 3. Salvar JSON Atualizado
-    with open(ARQUIVO_TRADES, "w") as f:
+    # 3. Salvar JSON Atualizado (Caminho Absoluto)
+    with open(CAMINHO_TRADES, "w") as f:
         json.dump(trades_processados, f, indent=4)
 
     # 4. Calcular Estatísticas
@@ -326,6 +336,8 @@ def auditar():
     print("📤 Enviando para Telegram...")
     with open(arquivo_gerado, 'rb') as doc:
         bot.send_document(TELEGRAM_CHAT_ID, doc, caption=f"📊 **Fechamento Diário**\n\n💰 Saldo: R$ {saldo_acumulado:.2f}\n📈 Rentabilidade: {rentabilidade_robo:.2f}% (CDI: {benchmarks['cdi']:.2f}%)")
+    
+    print("Sucesso!")
 
 if __name__ == "__main__":
     auditar()

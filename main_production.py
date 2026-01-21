@@ -4,6 +4,16 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 
+# --- CORREÇÃO DE CAMINHO ABSOLUTO (A BLINDAGEM) ---
+# Isso garante que o Cron ache os arquivos (.env, json, etc)
+DIRETORIO_BASE = os.path.dirname(os.path.abspath(__file__))
+CAMINHO_ENV = os.path.join(DIRETORIO_BASE, '.env')
+CAMINHO_TRADES = os.path.join(DIRETORIO_BASE, 'trades_simulados.json')
+CAMINHO_CARTEIRA = os.path.join(DIRETORIO_BASE, 'carteira_alvo.json')
+
+# Carrega o .env explicitamente do caminho certo
+load_dotenv(CAMINHO_ENV)
+
 # Bibliotecas de Dados
 import yfinance as yf
 import pandas as pd
@@ -25,9 +35,8 @@ except ImportError:
     except ImportError:
         DDGS = None
 
-# --- CONFIGURAÇÃO ---
-load_dotenv()
-
+# --- CONFIGURAÇÃO DE CHAVES ---
+# (Pega direto do arquivo .env ou do sistema)
 if os.getenv("GOOGLE_API_KEY"):
     os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
@@ -45,6 +54,7 @@ def validar_setup_v2(ticker):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        # Filtro de liquidez/atualização (5 dias)
         if (datetime.now() - df.index[-1].to_pydatetime()).days > 5:
             return False, None
 
@@ -71,8 +81,7 @@ def validar_setup_v2(ticker):
         print(f"Erro no screener ({ticker}): {e}")
         return False, None
 
-# --- 2. FERRAMENTA DE BUSCA (CORRIGIDA PARA V5) ---
-
+# --- 2. FERRAMENTA DE BUSCA ---
 @tool("News Search")
 def search_news(query: str):
     """Busca notícias recentes."""
@@ -80,9 +89,7 @@ def search_news(query: str):
         return "Erro: Instale 'pip install -U duckduckgo-search'"
         
     try:
-        # CORREÇÃO CRÍTICA: Sintaxe simplificada que funciona em todas as versões
         with DDGS() as ddgs:
-            # Passamos 'query' direto, sem 'keywords='
             results = list(ddgs.text(query, region='br-pt', max_results=3))
         
         if not results:
@@ -91,11 +98,9 @@ def search_news(query: str):
         return str(results)
         
     except Exception as e:
-        # Se der erro, não trava o robô. Retorna mensagem de erro.
         return f"Erro na busca ({str(e)}). Assumir risco neutro."
 
 # --- 3. AGENTES (Gemini 2.0 Flash) ---
-
 MODELO_IA = "gemini/gemini-2.0-flash"
 
 analista_risco = Agent(
@@ -116,7 +121,6 @@ manager = Agent(
 )
 
 # --- 4. TAREFAS ---
-
 t_risco = Task(
     description='Busque notícias de {ticket}. Se der erro, responda "Sem notícias relevantes".',
     expected_output='Resumo curto.',
@@ -146,46 +150,43 @@ equipe = Crew(
     process=Process.sequential
 )
 
-# --- FUNÇÃO NOVA: REGISTRAR TRADE SIMULADO ---
+# --- FUNÇÃO CORRIGIDA: REGISTRAR TRADE ---
 def registrar_trade(sinal):
-    arquivo = "trades_simulados.json"
+    # Usa o CAMINHO_TRADES absoluto definido lá em cima
     historico = []
     
-    # Carrega histórico existente se houver
-    if os.path.exists(arquivo):
-        with open(arquivo, "r") as f:
+    if os.path.exists(CAMINHO_TRADES):
+        with open(CAMINHO_TRADES, "r") as f:
             try:
                 historico = json.load(f)
             except:
                 pass
     
-    # Evita duplicatas no mesmo dia (Importante para não sujar o dashboard)
+    # Evita duplicatas do dia
     hoje = datetime.now().strftime("%Y-%m-%d")
     for trade in historico:
         if trade['ticker'] == sinal['ticker'] and trade['data'].startswith(hoje):
             return 
 
-    # Cria o registro do trade
     novo_trade = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": sinal['ticker'],
         "entrada": sinal['entrada'],
         "stop": sinal['stop'],
         "alvo": sinal['alvo'],
-        "status": "ABERTO", # ABERTO, GAIN ou LOSS
+        "status": "ABERTO",
         "resultado_financeiro": 0.0,
         "confianca": sinal['confianca']
     }
     
     historico.append(novo_trade)
     
-    with open(arquivo, "w") as f:
+    with open(CAMINHO_TRADES, "w") as f:
         json.dump(historico, f, indent=4)
         
     print(f"📝 Trade simulado registrado no caderno: {sinal['ticker']}")
 
 # --- 5. TELEGRAM ---
-
 def enviar_alerta(sinal):
     if not bot: return
     emoji = "🟢" if sinal.get('confianca') == "ALTA" else "🟡"
@@ -199,19 +200,21 @@ def enviar_alerta(sinal):
     """
     try:
         bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Erro Telegram: {e}")
 
-# --- 6. EXECUÇÃO COM FREIO E REGISTRO ---
-
+# --- 6. EXECUÇÃO ---
 def rodar_robo():
-    print("--- INICIANDO ROBÔ DE SWING TRADE (V6 - FINAL COM AUDITOR) ---")
+    print("--- INICIANDO ROBÔ DE SWING TRADE (V7 - SMART & BLINDADO) ---")
     
-    if not os.path.exists("carteira_alvo.json"):
-        print("Erro: carteira_alvo.json não encontrado.")
-        return
+    # Usa o CAMINHO_CARTEIRA absoluto
+    if not os.path.exists(CAMINHO_CARTEIRA):
+        print(f"Erro: {CAMINHO_CARTEIRA} não encontrado.")
+        # Cria um arquivo padrão se não existir para não quebrar
+        with open(CAMINHO_CARTEIRA, "w") as f:
+            json.dump(["WEGE3.SA", "VALE3.SA", "PETR4.SA", "ITUB4.SA", "BBAS3.SA"], f)
         
-    with open("carteira_alvo.json", "r") as f:
+    with open(CAMINHO_CARTEIRA, "r") as f:
         carteira = json.load(f)
         
     for ticker in carteira:
@@ -226,19 +229,24 @@ def rodar_robo():
                 'price': f"{df['Close'].iloc[-1]:.2f}"
             }
             try:
-                # FREIO DE SEGURANÇA: Espera 20 segundos antes de chamar a IA
-                # Isso evita o erro 429 (Resource Exhausted)
                 print("⏳ Aguardando 20s para respeitar limite do Google...")
                 time.sleep(20)
                 
                 resultado = equipe.kickoff(inputs=inputs)
-                texto_limpo = str(resultado).replace('```json', '').replace('```', '').strip()
+                
+                # Tratamento de erro da string JSON
+                if hasattr(resultado, 'raw'):
+                    texto_limpo = resultado.raw
+                else:
+                    texto_limpo = str(resultado)
+                
+                texto_limpo = texto_limpo.replace('```json', '').replace('```', '').strip()
                 sinal = json.loads(texto_limpo)
                 
                 if sinal['decisao'] == "COMPRA":
                     print(f"🚀 COMPRA CONFIRMADA: {ticker}")
                     enviar_alerta(sinal)
-                    registrar_trade(sinal)  # <--- REGISTRO AUTOMÁTICO AQUI
+                    registrar_trade(sinal)
                 else:
                     print(f"❌ {ticker} vetado pela IA.")
             except Exception as e:
